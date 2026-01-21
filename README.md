@@ -221,13 +221,6 @@ $kernel->run();
 
 When a request is made, the framework checks the routes defined in the plugins, resolves their dependencies, and processes them. It can also resolve and execute middlewares (if any).
 
-```php
-// Example of adding routes in a plugin:
-$plugin = new HelloWorldPlugin();
-$response = $plugin->execute($executionContext, $serviceRegistry);
-$response->send();
-```
-
 ## License
 
 This framework is licensed under the MIT License.
