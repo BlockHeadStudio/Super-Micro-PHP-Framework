@@ -892,10 +892,10 @@ namespace Framework\Core {
         /** Register definition and add it to the dependency graph */
         public function register($definition): void {
             $this->definitions[$definition->name] = $definition;
-            $dependencies = $definition->requires;
             if ($definition instanceof PluginDefinition) {
-                // Plugins depend on Modules (via 'requires') AND other Plugins (via 'dependsOn')
-                $dependencies = array_merge($dependencies, $definition->dependsOn);
+                $dependencies = $definition->dependsOn;
+            } else {
+                $dependencies = $definition->requires;
             }
             $this->graph->addNode($definition->name, $dependencies, $definition->provides, $definition);
             if ($this->router && $definition instanceof PluginDefinition) $this->router->addFromDefinition($definition);
