@@ -273,19 +273,19 @@ namespace Framework\Discovery {
         /**
          * lazy-loads the PHP file and returns the Plugin instance.
          */
-        public function instantiate(): AbstractPlugin {
+        public function instantiate(): ?AbstractPlugin {
             if (!$this->loaded) { 
                 $file = $this->dirPath . '/Plugin.php';
-                if (!file_exists($file)) throw new \RuntimeException("Plugin file missing: $file");
+                if (!file_exists($file)) return null;
                 require_once $file; 
                 $this->loaded = true; 
             }
             
-            if (!class_exists($this->className)) throw new \RuntimeException("Plugin class '{$this->className}' not found");
+            if (!class_exists($this->className)) return null;
             $instance = new ($this->className)();
             
             if (!$instance instanceof AbstractPlugin) {
-                throw new \RuntimeException("Class '{$this->className}' must extend AbstractPlugin");
+                return null;
             }
             return $instance;
         }
@@ -1063,6 +1063,9 @@ namespace Framework\Core {
 
                 foreach ($plan["plugins"] as $pName) {
                     $p = $this->plugins->get($pName);
+
+                    // If plugin is null just continue
+                    if (!$p) continue;
                     $p->setMissing($plan["missing"]);
                     if (!$p->validate()) throw new \Exception("Plugin $pName failed validation");
                     
