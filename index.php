@@ -797,15 +797,6 @@ namespace Framework\Cache {
 // COMPONENT: CONTRACTS & BASE
 // Base classes for the user to extend.
 // ---------------------------------------------------------
-namespace Framework\Contracts {
-    final readonly class ModuleManifest {
-        public function __construct(public string $name, public array $provides = [], public array $requires = []) {}
-    }
-    final readonly class PluginManifest {
-        public function __construct(public string $name, public array $routes = [], public array $provides = [], public array $requires = [], public array $dependsOn = []) {}
-    }
-}
-
 namespace Framework\Base {
     use Framework\Core\{ServiceRegistry, ExecutionContext, Config};
     use Framework\Http\Response;
