@@ -1,269 +1,589 @@
+# Super Micro
 
-# Super Micro PHP Framework
+**A minimalist, plugin-oriented PHP micro-kernel framework for building modular web applications**
 
-A lightweight, component-based PHP framework designed for flexibility and performance. It provides immutable HTTP message handling, dependency injection, and a modular approach to organizing plugins and services. 
+Super Micro is a lightweight, high-performance PHP framework that implements a plugin-based architecture with automatic dependency resolution, dynamic routing, and built-in caching. Despite its small footprint, it provides enterprise-grade features like topological sorting, service containers, and modular extension discovery.
 
 ## Features
 
-- **Immutable HTTP Request/Response**: Uses immutable HTTP message objects.
-- **Manifest-based Discovery**: Supports discovering plugins and modules dynamically via manifest files.
-- **Dependency Injection**: Automatic service resolution and dependency injection for modules and plugins.
-- **Topological Dependency Resolution**: Automatically resolves dependencies for modules and plugins.
-- **Compiled Routing**: Fast route matching via compiled regular expressions.
-- **OPCache-Optimized Caching**: Utilizes file-based caching that is optimized for OPCache.
+### Core Architecture
+- **Plugin-Based System** - Extend functionality through isolated, self-contained plugins
+- **Automatic Dependency Resolution** - Graph-based dependency injection with topological sorting
+- **Dynamic Module Discovery** - Automatic scanning and loading of modules and plugins
+- **Lazy Loading** - Components are instantiated only when needed
+- **Service Container** - Centralized dependency injection container with singleton pattern
 
-## Table of Contents
+### HTTP & Routing
+- **Smart Router** - Static and dynamic route matching with parameter extraction
+- **Regex Support** - Full regex patterns for advanced route matching
+- **Method-Based Routing** - Route by HTTP method (GET, POST, PUT, DELETE, etc.)
+- **Request/Response Abstraction** - Clean, immutable HTTP interfaces
+- **Context Pipeline** - Request flows through plugin chain with shared context
 
-- [Installation](#installation)
-- [Directory Structure](#directory-structure)
-- [Creating Plugins and Modules](#creating-plugins-and-modules)
-  - [Plugin Structure](#plugin-structure)
-  - [Module Structure](#module-structure)
-  - [Example Plugin](#example-plugin)
-  - [Example Module](#example-module)
-- [Usage](#usage)
-- [License](#license)
+### Performance & Caching
+- **OPcache-Aware Cache Driver** - PHP-based caching with OPcache invalidation
+- **Route Plan Caching** - Execution plans cached to eliminate runtime resolution overhead
+- **Discovery Caching** - Module/plugin manifests cached with automatic invalidation
+- **Zero-Config Performance** - Fast out of the box with intelligent defaults
+
+### Developer Experience
+- **Manifest-Based Configuration** - JSON manifests for simple plugin definition
+- **File-Based Logging** - Structured logging with automatic directory creation
+- **Debug Mode** - Detailed error pages with stack traces during development
+- **Type Safety** - Leverages PHP 8.1+ readonly classes and strict types
+- **No External Dependencies** - Pure PHP implementation
+
+## Requirements
+
+- PHP 8.1 or higher
+- OPcache (recommended for production)
 
 ## Installation
 
-To install the framework, simply clone the repository or download the files.
+- Download index.php file and place it on your server
+
+### Directory Structure
+
+```
+super-micro/
+public/index.php          # Entry point (the kernel)
+extensions/modules/       # Shared modules (services, utilities)
+  example-module/
+    manifest.json
+    Module.php
+extensions/plugins/           # Request handlers (controllers, middlewares)
+  example-plugin/
+    manifest.json
+    Plugin.php
+data/cache/             # File-based cache storage
+data/logs/              # Application logs
+```
+
+## Quick Start
+
+### 1. Create a Module
+
+Modules provide shared functionality and services.
+
+**`extensions/modules/database/manifest.json`**
+```json
+{
+  "name": "database",
+  "className": "DatabaseModule",
+  "provides": ["db", "database"],
+  "requires": [],
+  "providerScore": 100
+}
+```
+
+**`extensions/modules/database/Module.php`**
+```php
+<?php
+namespace Framework\Core;
+
+class DatabaseModule extends Module
+{
+    public function boot(Services $s, Config $c): void
+    {
+        $s->bind('db', function() use ($c) {
+            return new \PDO($c->get('db_dsn'));
+        });
+        $this->booted = true;
+    }
+
+    public function terminate(): void
+    {
+        // Cleanup logic
+    }
+}
+```
+
+### 2. Create a Plugin
+
+Plugins handle HTTP requests and generate responses.
+
+**`extensions/plugins/hello/manifest.json`**
+```json
+{
+  "name": "hello",
+  "className": "HelloPlugin",
+  "routes": {
+    "/hello/{name}": ["GET"]
+  },
+  "requires": [],
+  "dependsOn": [],
+  "provides": []
+}
+```
+
+**`extensions/plugins/hello/Plugin.php`**
+```php
+<?php
+namespace Framework\Core;
+use Framework\Http\Response;
+
+class HelloPlugin extends Plugin
+{
+    public function execute(Context $ctx, Services $s): ?Response
+    {
+        $name = $ctx->request()->get('name', 'World');
+        return Response::html("<h1>Hello, {$name}!</h1>");
+    }
+
+    public function validate(): bool
+    {
+        return true;
+    }
+}
+```
+
+### 3. Configure and Run
+
+The kernel auto-discovers and loads all extensions:
+
+```php
+// public/index.php is already configured
+// Just navigate to: http://localhost/hello/SuperMicro
+```
+
+## Architecture Deep Dive
+
+### Request Lifecycle
+
+1. **Gate Phase** - Validate request size, content-type, and method
+2. **Discovery** - Scan for modules and plugins (cached after first run)
+3. **Routing** - Match request URI to plugin route
+4. **Planning** - Resolve dependency graph and create execution plan (cached)
+5. **Module Bootstrapping** - Initialize required modules in dependency order
+6. **Plugin Chain Execution** - Execute plugin pipeline until response or halt
+7. **Response Delivery** - Send HTTP response with proper headers
+8. **Termination** - Cleanup modules in reverse order
+
+### Dependency Resolution
+
+Super Micro uses a sophisticated graph-based resolver that:
+- Handles transitive dependencies automatically
+- Performs topological sorting to determine load order
+- Supports multiple providers for the same capability
+- Scores providers to select the best implementation
+- Detects circular dependencies and fails fast
+- Allows optional dependencies with graceful degradation
+
+**Example dependency chain:**
+```
+Plugin: BlogPost
+  depends on: Template
+    requires: Database
+  requires: Database, Cache
+```
+
+The kernel resolves this to: `Database’ `Cache’ Template’ BlogPost`
+
+### Context & Capabilities
+
+The `Context` object flows through the plugin chain, allowing plugins to:
+- Share data via `provide()` and `consume()`
+- Modify request attributes with `attr()`
+- Halt execution early with `halt()`
+- Check if request was halted via `isHalted()`
+
+**Example middleware pattern:**
+```php
+class AuthPlugin extends Plugin
+{
+    public function execute(Context $ctx, Services $s): ?Response
+    {
+        $token = $ctx->request()->header('Authorization');
+        
+        if (!$this->validateToken($token)) {
+            $ctx->halt('Unauthorized', 401);
+            return null;
+        }
+        
+        $ctx->provide('user', $this->getUserFromToken($token));
+        return null; // Continue to next plugin
+    }
+}
+```
+
+### Service Container
+
+Lazy-loading singleton container for dependency injection:
+
+```php
+// In a Module
+$services->bind('mailer', function() {
+    return new MailService($config);
+});
+
+// In a Plugin
+$mailer = $services->resolve('mailer');
+$mailer->send('Welcome!');
+```
+
+### Routing Patterns
+
+Super Micro supports three routing styles:
+
+**1. Static Routes**
+```json
+{
+  "routes": {
+    "/about": ["GET"],
+    "/contact": ["GET", "POST"]
+  }
+}
+```
+
+**2. Dynamic Routes with Parameters**
+```json
+{
+  "routes": {
+    "/user/{id}": ["GET"],
+    "/post/{slug}": ["GET"],
+    "/api/{version}/{endpoint}": ["*"]
+  }
+}
+```
+
+**3. Regex Routes**
+```json
+{
+  "routes": {
+    "#^/api/v[0-9]+/.*$#": ["GET", "POST"],
+    "~/products/(\\d+)~": ["GET"]
+  }
+}
+```
+
+Parameters are extracted and available via `$ctx->request()->get('param_name')`.
+
+### Caching Strategy
+
+Three-tier caching system:
+
+1. **Discovery Cache** - Manifest scanning results (24h TTL)
+2. **Route Plan Cache** - Dependency resolution results (no expiration)
+3. **OPcache Integration** - PHP file cache with automatic invalidation
+
+Cache keys are content-addressable (MD5 hashes) for automatic invalidation.
+
+## Manifest Reference
+
+### Module Manifest
+
+```json
+{
+  "name": "unique-module-name",
+  "className": "ModuleClassName",
+  "provides": ["capability1", "capability2"],
+  "requires": [],
+  "providerScore": 100
+}
+```
+
+- **name** - Unique name for this module
+- **className** - PHP class name (must extend `Framework\Core\Module`)
+- **provides** - Capabilities this module provides to plugins
+- **requires** - Other modules' capabilities this module depends on
+- **providerScore** - Priority when multiple modules provide the same capability (higher = preferred)
+
+### Plugin Manifest
+
+```json
+{
+  "name": "unique-plugin-name",
+  "className": "PluginClassName",
+  "routes": {
+    "/path": ["GET"],
+    "/api/{id}": ["POST", "PUT"]
+  },
+  "requires": ["database", "cache"],
+  "dependsOn": ["auth"],
+  "provides": [],
+  "providerScore": 100
+}
+```
+
+- **name** - Unique name for this plugin
+- **className** - PHP class name (must extend `Framework\Core\Plugin`)
+- **routes** - URI patterns this plugin handles
+- **requires** - Module capabilities needed (e.g., "database")
+- **dependsOn** - Other capabilities provided by other plugins that must execute before this one
+- **provides** - Capabilities this plugin provides to other plugins
+- **providerScore** - Priority when multiple plugins provide the same capability (higher = preferred)
+
+## API Reference
+
+### Request Object
+
+```php
+$request = Request::capture();
+
+$uri = $request->uri;           // Parsed URI path
+$method = $request->method;     // HTTP method
+$value = $request->get('key');  // Get from params/body/attributes
+$header = $request->header('Content-Type');
+$newReq = $request->with('attributes', 'key', 'value');
+```
+
+### Response Object
+
+```php
+// HTML Response
+Response::html('<h1>Hello</h1>', 200);
+
+// JSON Response
+Response::json(['status' => 'ok'], 200);
+
+// Redirect
+Response::redirect('/new-location', 302);
+
+// Send Response
+$response->send();
+```
+
+### Context API
+
+```php
+$ctx = new Context($request);
+
+// Request access
+$request = $ctx->request();
+
+// Attributes
+$ctx->attr('key', 'value');
+
+// Capabilities
+$ctx->provide('service', $serviceInstance);
+$service = $ctx->consume('service');
+
+// Flow control
+$ctx->halt('Reason', 403);
+if ($ctx->isHalted()) { /* ... */ }
+$response = $ctx->earlyResponse();
+```
+
+### Services Container
+
+```php
+$services = Services::get();
+
+// Binding
+$services->bind('logger', function() {
+    return new Logger();
+});
+
+// Resolution (creates singleton)
+$logger = $services->resolve('logger');
+```
+
+### Logger Interface
+
+```php
+$logger->log('info', 'User logged in', ['user_id' => 123]);
+$logger->log('error', 'Database connection failed');
+```
+
+### Cache Driver
+
+```php
+$cache = new PhpDriver('/path/to/cache');
+
+$cache->set('key', $value, 3600);
+$value = $cache->get('key');
+$cache->delete('key');
+```
+
+## Configuration
+
+Edit the configuration array in `public/index.php`:
+
+```php
+$cfg = new Config([
+    'db_dsn' => 'sqlite:' . dirname(__DIR__) . '/data/db.sqlite', // Set to your path or db config
+    'cache_path' => dirname(__DIR__) . '/data/cache',
+    'log_path' => dirname(__DIR__) . '/data/logs/app.log',
+    'modules_path' => dirname(__DIR__) . '/extensions/modules',
+    'plugins_path' => dirname(__DIR__) '/extensions/plugins',
+    'debug' => true,  // Set to false in production
+]);
+```
+
+## Production Deployment
+
+### 1. Enable OPcache
+
+```ini
+; php.ini
+opcache.enable=1
+opcache.memory_consumption=128
+opcache.interned_strings_buffer=8
+opcache.max_accelerated_files=10000
+opcache.validate_timestamps=0  ; Disable in production
+```
+
+### 2. Disable Debug Mode
+
+```php
+'debug' => false
+```
+
+### 3. Set Proper Permissions
 
 ```bash
-git clone https://github.com/BlockHeadStudio/Super-Micro-PHP-Framework
+chmod -R 755 public/
+chmod -R 777 data/cache data/logs
 ```
 
-## Directory Structure
+### 4. Configure Web Server
 
-The basic directory structure is as follows:
-
-```
-/project-root
-    /extensions
-        /modules
-            /your-module
-                /Module.php
-                /manifest.json
-        /plugins
-            /your-plugin
-                /Plugin.php
-                /manifest.json
-    /data
-        /cache
-        /logs
-        /db.sqlite
-    /src
-    index.php
+**Apache (.htaccess)**
+```apache
+RewriteEngine On
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^ index.php [L]
 ```
 
-### Key Components:
+**Nginx**
+```nginx
+location / {
+    try_files $uri $uri/ /index.php?$query_string;
+}
 
-- `/extensions`: Contains all the modules and plugins.
-  - `/modules`: Contains service provider modules.
-  - `/plugins`: Contains route-handling plugins.
-- `/data`: Stores cache, logs, and the SQLite database.
-
-## Creating Plugins and Modules
-
-### Plugin Structure
-
-A **plugin** is used to define a route handler. It implements the `AbstractPlugin` class and can be executed during the request handling process.
-
-A typical plugin has the following structure:
-
-```php
-// /extensions/plugins/my-plugin/Plugin.php
-namespace MyPlugin;
-
-use Framework\Base\AbstractPlugin;
-use Framework\Http\Response;
-use Framework\Core\ExecutionContext;
-use Framework\Core\ServiceRegistry;
-
-class MyPlugin extends AbstractPlugin {
-    public function execute(ExecutionContext $ctx, ServiceRegistry $services): ?Response {
-        // Business logic
-        return new Response("Hello from MyPlugin");
-    }
+location ~ \.php$ {
+    fastcgi_pass unix:/var/run/php/php8.1-fpm.sock;
+    fastcgi_index index.php;
+    include fastcgi_params;
 }
 ```
 
-### Module Structure
+## Performance Tips
 
-A **module** is used to provide services or dependencies. It implements the `AbstractModule` class and registers services into the service container.
+1. **Use OPcache** - Provides 2-3x performance boost
+2. **Keep manifests simple** - Discovery is cached but initial scan matters
+3. **Minimize plugin chains** - Each plugin adds overhead
+4. **Use static routes** - Faster than dynamic or regex routes
+5. **Disable discovery cache in dev** - Pass `true` to `Scanner::scan(true)`
 
-A typical module has the following structure:
+## Advanced Patterns
 
-```php
-// /extensions/modules/my-module/Module.php
-namespace MyModule;
-
-use Framework\Base\AbstractModule;
-use Framework\Core\ServiceRegistry;
-use Framework\Core\Config;
-
-class MyModule extends AbstractModule {
-    public function boot(ServiceRegistry $registry, Config $config): void {
-        // Register services, etc.
-        $registry->bind('my-service', function() {
-            return new MyService();
-        });
-    }
-
-    public function terminate(): void {
-        // Cleanup if necessary
-    }
-}
-```
-
-### Example Plugin
+### Middleware Chain
 
 ```php
-// /extensions/plugins/hello-world/Plugin.php
-namespace HelloWorldPlugin;
-
-use Framework\Base\AbstractPlugin;
-use Framework\Http\Response;
-use Framework\Core\ExecutionContext;
-use Framework\Core\ServiceRegistry;
-
-class HelloWorldPlugin extends AbstractPlugin {
-    public function execute(ExecutionContext $ctx, ServiceRegistry $services): ?Response {
-        // Business logic
-        return new Response("Hello, World!");
-    }
-}
-```
-
-### Example Module
-
-```php
-// /extensions/modules/database/Module.php
-namespace DatabaseModule;
-
-use Framework\Base\AbstractModule;
-use Framework\Core\ServiceRegistry;
-use Framework\Core\Config;
-use PDO;
-
-class DatabaseModule extends AbstractModule {
-    public function boot(ServiceRegistry $registry, Config $config): void {
-        // Register database connection service
-        $registry->bind('db', function() use ($config) {
-            return new PDO($config->get('db_dsn'));
-        });
-    }
-
-    public function terminate(): void {
-        // Close any resources if necessary
-    }
-}
-```
-
-### Manifest Files
-
-Each plugin and module must include a `manifest.json` file that describes the capabilities and dependencies of the component.
-
-Example **Plugin Manifest** (`/extensions/plugins/hello-world/manifest.json`):
-
-```json
+// AuthPlugin.php
+public function execute(Context $ctx, Services $s): ?Response
 {
-    "name": "HelloWorldPlugin",
-    "className": "HelloWorldPlugin\HelloWorldPlugin",
-    "routes": {
-        "/hello": ["GET"]
-    },
-    "provides": [],
-    "requires": [],
-    "dependsOn": []
+    // Authenticate and continue
+    $ctx->provide('user', $user);
+    return null;  // Continue chain
 }
-```
 
-Example **Module Manifest** (`/extensions/modules/database/manifest.json`):
-
-```json
+// LoggerPlugin.php
+public function execute(Context $ctx, Services $s): ?Response
 {
-    "name": "DatabaseModule",
-    "className": "DatabaseModule\DatabaseModule",
-    "provides": ["db"],
-    "requires": []
+    // Log and continue
+    $s->resolve('logger')->log('info', 'Request started');
+    return null;
+}
+
+// ControllerPlugin.php
+public function execute(Context $ctx, Services $s): ?Response
+{
+    $user = $ctx->consume('user');
+    // Handle request
+    return Response::json(['user' => $user->name]);
 }
 ```
 
-## Usage
+Ensure proper `dependsOn` in manifests to maintain order.
 
-### Running the Framework
-
-The `index.php` file boots the framework, discovers the modules and plugins, and runs the application.
+### Multiple Providers
 
 ```php
-// index.php
-use Framework\Core\{Kernel, Config};
-use Framework\Cache\PhpNativeDriver;
-use Framework\Log\FileLogger;
+// Module A provides "cache" with score 100
+// Module B provides "cache" with score 150 (Redis)
 
-$config = new Config([
-    "db_dsn" => "sqlite:" . dirname(__DIR__) . "/data/db.sqlite",
-    "cache_path" => dirname(__DIR__) . "/data/cache",
-    "log_path" => dirname(__DIR__) . "/data/logs/app.log",
-    "modules_path" => dirname(__DIR__) . "/extensions/modules",
-    "plugins_path" => dirname(__DIR__) . "/extensions/plugins",
-    "debug" => true
-]);
-
-$kernel = new Kernel($config);
-$kernel->setCache(new PhpNativeDriver($config->get("cache_path")));
-$kernel->setLogger(new FileLogger($config->get("log_path")));
-$kernel->discover($config->get("modules_path"), $config->get("plugins_path"));
-$kernel->run();
+// The kernel will choose Module B automatically, similar effect applies to plugins
 ```
 
-### Handling Requests
+### Optional Dependencies
 
-When a request is made, the framework checks the routes defined in the plugins, resolves their dependencies, and processes them. It can also resolve and execute middlewares (if any).
+```php
+public function execute(Context $ctx, Services $s): ?Response
+{
+    if (in_array('premium.feature', $this->missing)) { // Plugin capabilities are treated as optional dependencies, make sure to check missing array
+        return Response::html('Feature not available');
+    }
+    
+    // Use premium feature
+}
+```
 
-## License
+## Troubleshooting
 
-This framework is licensed under the MIT License.
+### Routes Not Found
+- Check manifest.json syntax
+- Verify routes array structure
+- Clear cache: `rm -rf data/cache/*`
+- Enable debug mode and check error output
 
+### Module Not Loading
+- Verify `Module.php` exists in module directory
+- Check class name matches manifest
+- Ensure namespace is `Framework\Core`
+- Check boot() method sets `$this->booted = true`
+- Check dependencies, ensure it does not depend on plugin capability
+
+### Circular Dependencies
+- Review `dependsOn` chains
+- Use `requires` for modules capabilities and `dependsOn` for plugin capabilities
+- Error message shows the cycle
+
+### Performance Issues
+- Enable OPcache
+- Check discovery cache is working (logs should show cache hits)
+- Profile with Xdebug to find bottlenecks
+- Reduce plugin chain length
+
+## Testing
+
+Run the included example:
+
+```bash
+php -S localhost:8000 -t public
+```
+
+Visit `http://localhost:8000/hello/World`
 
 ## Contributing
 
-We welcome contributions to the Super Micro PHP Framework! Whether it's fixing a bug, adding a new feature, or improving documentation, your help is appreciated. Please follow these guidelines when contributing:
+Contributions are welcome! Please:
 
-### Reporting Issues
+1. Fork the repository
+2. Create a feature branch
+3. Write tests for new functionality
+4. Submit a pull request
 
-If you encounter an issue, please follow these steps:
+## License
 
-1. Search for an existing issue to see if it has already been reported.
-2. If you find an existing issue, add a comment with any additional information you may have.
-3. If the issue doesn't exist, please open a new issue, providing:
+MIT License - feel free to use in commercial and open-source projects.
 
-   - A description of the problem.
-   - Steps to reproduce the problem.
-   - Expected and actual behavior.
-   - Screenshots (if applicable).
-   - Any error messages or logs.
+## Credits
 
-### Submitting Code
+Created as a minimalist alternative to heavyweight PHP frameworks. Inspired by microkernel architecture patterns and modern dependency injection containers.
 
-If you're submitting a pull request (PR), please follow these steps:
+## Philosophy
 
-1. **Fork the repository**: Create a personal fork of the repository.
-2. **Create a new branch**: Branch off from the `main` branch. Give your branch a descriptive name.
-3. **Commit your changes**: Write clear, concise commit messages that describe the purpose of the changes. Reference any related issues in your commits.
-4. **Push your changes**: Push your branch to your forked repository.
-5. **Create a pull request**: Open a PR from your fork to the `main` branch of the original repository. Provide a clear description of what the PR does and why it is needed.
+Super Micro embodies these principles:
 
-### Documentation
+- **Simplicity** - One file, zero dependencies, readable code
+- **Modularity** - Everything is a plugin or module
+- **Performance** - Cache everything, lazy-load everything
+- **Flexibility** - Convention over configuration, but configurable when needed
+- **Transparency** - You can read and understand the entire framework in an hour
 
-Please make sure to update relevant documentation if your changes affect the framework's usage or setup. If you're adding a new feature, explain how it works and provide examples.
+---
 
-### Pull Request Reviews
-
-After submitting a pull request, please be open to feedback. I may request changes before merging your PR. Once your PR is reviewed and approved, it will be merged.
-
-### Code of Conduct
-
-By contributing to this project, you agree to follow the project's code of conduct and be respectful and professional in all communications.
-
-Thank you for contributing!
+**Built with ❤️¸ for developers who want power without bloat**
