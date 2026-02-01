@@ -1,60 +1,47 @@
 <?php
 declare(strict_types=1);
 
-/**
- * SUPER MICRO
- * 
- * A lightweight, component-based PHP framework featuring:
- * - Immutable HTTP Message implementation
- * - Manifest-based Discovery (Modules/Plugins)
- * - Dependency Injection & Service Registry
- * - Topological Dependency Resolution
- * - Compiled Routing
- * - OPCache-optimized Caching
- */
-
-// ---------------------------------------------------------
-// COMPONENT: HTTP
-// Handles Request/Response objects immutably.
-// ---------------------------------------------------------
+// ============================================================================
+// HTTP LAYER - Request/Response handling
+// ============================================================================
 namespace Framework\Http {
-
     /**
-     * Represents an incoming HTTP request.
-     * This class is immutable; modification methods return a new instance.
+     * Immutable HTTP request representation
+     * Captures and normalizes incoming HTTP requests
      */
-    final class Request
+    readonly class Request
     {
-        /**
-         * @param string $uri The request URI path.
-         * @param string $method The HTTP verb (GET, POST, etc).
-         * @param array $params Query string parameters ($_GET).
-         * @param array $body Parsed body parameters ($_POST).
-         * @param array $headers HTTP Headers.
-         * @param array $attributes Custom attributes attached during request lifecycle (e.g., route params).
-         */
         public function __construct(
-            private string $uri,
-            private string $method,
-            private array $params = [],
-            private array $body = [],
-            private array $headers = [],
-            private array $attributes = []
-        ) {}
+            public string $uri,
+            public string $method,
+            public array $params = [],
+            public array $body = [],
+            public array $headers = [],
+            public array $attributes = []
+        ) {
+        }
 
         /**
-         * Captures global PHP variables ($_SERVER, $_GET, $_POST) to create a Request instance.
-         * Normalizes HTTP headers from $_SERVER.
+         * Create Request from PHP globals ($_SERVER, $_GET, $_POST)
          */
         public static function capture(): self
         {
-            $headers = [];
-            foreach ($_SERVER as $key => $value) {
-                if (str_starts_with($key, "HTTP_")) {
-                    $headers[str_replace("_", "-", substr($key, 5))] = $value;
-                }
-            }
-
+            // Extract HTTP headers from $_SERVER (they start with HTTP_)
+            $headers = (array_combine(
+                array_map(
+                    fn($k) => str_replace("_", "-", substr($k, 5)),
+                    array_filter(
+                        array_keys($_SERVER),
+                        fn($k) => str_starts_with($k, "HTTP_")
+                    )
+                ),
+                array_filter(
+                    $_SERVER,
+                    fn($_, $k) => str_starts_with($k, "HTTP_"),
+                    ARRAY_FILTER_USE_BOTH
+                )
+            )) ?: [];
+            
             return new self(
                 parse_url($_SERVER["REQUEST_URI"] ?? "/", PHP_URL_PATH),
                 $_SERVER["REQUEST_METHOD"] ?? "GET",
@@ -64,1058 +51,1129 @@ namespace Framework\Http {
             );
         }
 
-        // Getters for request properties
-        public function getUri(): string { return $this->uri; }
-        public function getMethod(): string { return $this->method; }
-        public function getParams(): array { return $this->params; }
-        public function getBody(): array { return $this->body; }
-        public function getHeaders(): array { return $this->headers; }
-        public function getAttributes(): array { return $this->attributes; }
-
-        // Helper accessors with default values
-        public function getParam(string $key, mixed $default = null): mixed { return $this->params[$key] ?? $default; }
-        public function getBodyParam(string $key, mixed $default = null): mixed { return $this->body[$key] ?? $default; }
-        public function getHeader(string $name): ?string { return $this->headers[strtoupper($name)] ?? null; }
-        public function getAttribute(string $key, mixed $default = null): mixed { return $this->attributes[$key] ?? $default; }
-
-        // PSR-7 style "With" methods (Immutable setters)
-        public function withUri(string $uri): self { $c = clone $this; $c->uri = $uri; return $c; }
-        public function withMethod(string $method): self { $c = clone $this; $c->method = strtoupper($method); return $c; }
-        public function withParam(string $key, mixed $value): self { return $this->cloneWith('params', $key, $value); }
-        public function withBodyParam(string $key, mixed $value): self { return $this->cloneWith('body', $key, $value); }
-        public function withHeader(string $name, string $value): self { return $this->cloneWith('headers', strtoupper($name), $value); }
-        public function withAttribute(string $key, mixed $value): self { return $this->cloneWith('attributes', $key, $value); }
-        
         /**
-         * Merges multiple attributes at once.
+         * Get value from params, body, or attributes (in that order)
          */
-        public function withAttributes(array $attributes): self { 
-            $c = clone $this; 
-            $c->attributes = array_merge($c->attributes, $attributes); 
-            return $c; 
+        public function get(string $k, mixed $d = null): mixed
+        {
+            return $this->params[$k] ??
+                ($this->body[$k] ?? ($this->attributes[$k] ?? $d));
         }
 
         /**
-         * Internal helper to clone the object and modify a specific array property.
+         * Get HTTP header value (case-insensitive)
          */
-        private function cloneWith(string $prop, string $key, mixed $val): self {
-            $c = clone $this; 
-            $c->{$prop}[$key] = $val; 
-            return $c;
+        public function header(string $n): ?string
+        {
+            return $this->headers[strtoupper($n)] ?? null;
+        }
+
+        /**
+         * Create new Request with added/modified property
+         * Maintains immutability by returning new instance
+         */
+        public function with(
+            string $prop,
+            string|array $key,
+            mixed $val = null
+        ): self {
+            $data = get_object_vars($this);
+            is_array($key)
+                ? ($data[$prop] = [...$data[$prop], ...$key])
+                : ($data[$prop][$key] = $val);
+            return new self(...$data);
         }
     }
 
     /**
-     * Represents an outgoing HTTP response.
+     * Immutable HTTP response representation
+     * Encapsulates content, status code, and headers
      */
-    final class Response
+    readonly class Response
     {
         public function __construct(
-            private string $content = "",
-            private int $statusCode = 200,
-            private array $headers = []
-        ) {}
-
-        /** Factory for JSON responses */
-        public static function json(mixed $data, int $status = 200): self
-        {
-            return new self(json_encode($data, JSON_THROW_ON_ERROR), $status, ["Content-Type" => "application/json"]);
-        }
-
-        /** Factory for HTML responses */
-        public static function html(string $content, int $status = 200): self
-        {
-            return new self($content, $status, ["Content-Type" => "text/html; charset=UTF-8"]);
-        }
-
-        /** Factory for Redirects */
-        public static function redirect(string $url, int $status = 302): self
-        {
-            return new self("", $status, ["Location" => $url]);
+            public string $content = "",
+            public int $status = 200,
+            public array $headers = []
+        ) {
         }
 
         /**
-         * Emits headers and content to the client.
-         * Handles server-specific functions to close connections while keeping the process alive.
+         * Create JSON response
+         */
+        public static function json(mixed $d, int $s = 200): self
+        {
+            return new self(json_encode($d, JSON_THROW_ON_ERROR), $s, [
+                "Content-Type" => "application/json",
+            ]);
+        }
+
+        /**
+         * Create HTML response
+         */
+        public static function html(string $c, int $s = 200): self
+        {
+            return new self($c, $s, [
+                "Content-Type" => "text/html; charset=UTF-8",
+            ]);
+        }
+
+        /**
+         * Create redirect response
+         */
+        public static function redirect(string $u, int $s = 302): self
+        {
+            return new self("", $s, ["Location" => $u]);
+        }
+
+        /**
+         * Send response to client
+         * Sets headers, outputs content, and flushes buffers
          */
         public function send(): void
         {
             if (!headers_sent()) {
-                http_response_code($this->statusCode);
-                foreach ($this->headers as $key => $value) {
-                    header("{$key}: {$value}");
+                http_response_code($this->status);
+                foreach ($this->headers as $k => $v) {
+                    header("$k: $v");
                 }
             }
             echo $this->content;
             
-            // Attempt to close connection to client immediately so background tasks can continue
+            // Flush output based on available functions
             match (true) {
                 function_exists("fastcgi_finish_request") => fastcgi_finish_request(),
                 function_exists("litespeed_finish_request") => litespeed_finish_request(),
-                default => (ob_get_level() > 0 ? ob_end_flush() : null) . flush()
+                default => (ob_get_level() > 0 && ob_end_flush()) || flush(),
             };
         }
     }
 }
 
-// ---------------------------------------------------------
-// COMPONENT: LOGGING
-// Simple PSR-style logging interface and implementation.
-// ---------------------------------------------------------
+// ============================================================================
+// LOGGING - Structured logging with file output
+// ============================================================================
 namespace Framework\Log {
-    interface LoggerInterface {
-        public function log(string $level, string $message, array $context = []): void;
-        public function error(string $message, array $context = []): void;
+    interface Logger
+    {
+        public function log(string $level, string $msg, array $ctx = []): void;
     }
 
     /**
-     * Logs messages to a local file.
+     * File-based logger implementation
+     * Writes timestamped log entries to a file
      */
-    final class FileLogger implements LoggerInterface
+    final class FileLogger implements Logger
     {
-        /**
-         * @param string $logFile Absolute path to the log file. Creates directory if missing.
-         */
-        public function __construct(private string $logFile) {
-            $dir = dirname($logFile);
-            if (!is_dir($dir)) {
-                @mkdir($dir, 0777, true);
-            }
+        public function __construct(private string $file)
+        {
+            // Create directory if it doesn't exist
+            is_dir($d = dirname($file)) || @mkdir($d, 0777, true);
         }
 
         /**
-         * writes a formatted log entry to the file. Falls back to error_log on failure.
+         * Write log entry to file
+         * Format: [timestamp] LEVEL: message {context}
          */
-        public function log(string $level, string $message, array $context = []): void {
-            $date = date('Y-m-d H:i:s');
-            $ctxJson = !empty($context) ? json_encode($context, JSON_UNESCAPED_SLASHES) : '';
-            $entry = sprintf("[%s] %s: %s %s%s", $date, strtoupper($level), $message, $ctxJson, PHP_EOL);
-            
-            if (file_put_contents($this->logFile, $entry, FILE_APPEND) === false) {
-                error_log("Framework Fallback Log: $level - $message $ctxJson");
-            }
-        }
-
-        public function error(string $message, array $context = []): void {
-            $this->log('ERROR', $message, $context);
-        }
-    }
-}
-
-// ---------------------------------------------------------
-// COMPONENT: DISCOVERY UTILS
-// Helpers for serializing discovery objects.
-// ---------------------------------------------------------
-namespace Framework\Discovery {
-    trait SerializableTrait {
-        /** Reconstructs object from array (used during cache hydration) */
-        public static function fromArray(array $data): self {
-            return new self(...$data);
-        }
-        /** Converts object to array (used for cache storage) */
-        public function toArray(): array {
-            return get_object_vars($this);
-        }
-    }
-}
-
-// ---------------------------------------------------------
-// COMPONENT: DEFINITIONS
-// DTOs that represent the metadata of Plugins and Modules found on disk.
-// ---------------------------------------------------------
-namespace Framework\Discovery {
-    use Framework\Base\{AbstractPlugin, AbstractModule};
-
-    /**
-     * Holds metadata for a discovered Plugin (Routes, Capabilities, ClassName).
-     */
-    final class PluginDefinition
-    {
-        private bool $loaded = false;
-
-        public function __construct(
-            public readonly string $name,
-            public readonly string $className,
-            public readonly string $dirPath, // Path to directory containing Plugin.php
-            public readonly array $routes,
-            public readonly array $provides,
-            public readonly array $requires,
-            public readonly array $dependsOn,
-            public readonly int $providerScore = 100
-        ) {}
-
-        public static function fromArray(array $data): self {
-            return new self(
-                $data['name'],
-                $data['className'],
-                $data['dirPath'],
-                $data['routes'] ?? [],
-                $data['provides'] ?? [],
-                $data['requires'] ?? [],
-                $data['dependsOn'] ?? [],
-                $data['providerScore'] ?? 100
+        public function log(string $level, string $msg, array $ctx = []): void
+        {
+            $entry = sprintf(
+                "[%s] %s: %s %s\n",
+                date("Y-m-d H:i:s"),
+                strtoupper($level),
+                $msg,
+                $ctx ? json_encode($ctx) : ""
             );
+            
+            // Write to file or fallback to error_log
+            file_put_contents($this->file, $entry, FILE_APPEND) ?:
+            error_log("Log fallback: $entry");
         }
+    }
+}
 
-        public function toArray(): array {
-            return [
-                'name' => $this->name,
-                'className' => $this->className,
-                'dirPath' => $this->dirPath,
-                'routes' => $this->routes,
-                'provides' => $this->provides,
-                'requires' => $this->requires,
-                'dependsOn' => $this->dependsOn,
-                'providerScore' => $this->providerScore
-            ];
+// ============================================================================
+// CACHING - File-based cache with OPcache integration
+// ============================================================================
+namespace Framework\Cache {
+    interface Driver
+    {
+        public function get(string $k): mixed;
+        public function set(string $k, mixed $v, int $ttl = 3600): bool;
+        public function delete(string $k): bool;
+    }
+
+    /**
+     * PHP file-based cache driver
+     * Stores data as PHP arrays, leveraging OPcache for performance
+     */
+    final class PhpDriver implements Driver
+    {
+        public function __construct(private string $dir)
+        {
+            is_dir($dir) ||
+                @mkdir($dir, 0755, true) ||
+                throw new \RuntimeException("Cannot create: $dir");
         }
 
         /**
-         * lazy-loads the PHP file and returns the Plugin instance.
+         * Generate cache file path from key (MD5 hash)
          */
-        public function instantiate(): ?AbstractPlugin {
-            if (!$this->loaded) { 
-                $file = $this->dirPath . '/Plugin.php';
-                if (!file_exists($file)) return null;
-                require_once $file; 
-                $this->loaded = true; 
-            }
-            
-            if (!class_exists($this->className)) return null;
-            $instance = new ($this->className)();
-            
-            if (!$instance instanceof AbstractPlugin) {
+        private function path(string $k): string
+        {
+            return "{$this->dir}/" . md5($k) . ".php";
+        }
+
+        /**
+         * Retrieve cached value
+         * Returns null if not found or expired
+         */
+        public function get(string $k): mixed
+        {
+            if (!file_exists($f = $this->path($k))) {
                 return null;
             }
-            return $instance;
+            
+            try {
+                $d = require $f;
+            } catch (\Throwable) {
+                return null;
+            }
+            
+            // Check expiration and return value or delete if expired
+            return is_array($d) && ($d["exp"] === 0 || $d["exp"] >= time())
+                ? $d["val"]
+                : ($this->delete($k) ?: null);
+        }
+
+        /**
+         * Store value in cache
+         * TTL of 0 means no expiration
+         */
+        public function set(string $k, mixed $v, int $ttl = 3600): bool
+        {
+            $f = $this->path($k);
+            $tmp = "$f." . uniqid() . ".tmp";
+            
+            // Write to temp file first, then atomic rename
+            $ok =
+                file_put_contents(
+                    $tmp,
+                    "<?php return " .
+                        var_export(
+                            [
+                                "val" => $v,
+                                "exp" => $ttl > 0 ? time() + $ttl : 0,
+                            ],
+                            true
+                        ) .
+                        ";"
+                ) && rename($tmp, $f);
+            
+            // Invalidate OPcache for this file
+            $ok &&
+                function_exists("opcache_invalidate") &&
+                @opcache_invalidate($f, true);
+            
+            $ok || @unlink($tmp);
+            return (bool) $ok;
+        }
+
+        /**
+         * Delete cached value
+         */
+        public function delete(string $k): bool
+        {
+            $f = $this->path($k);
+            file_exists($f) &&
+                @unlink($f) &&
+                function_exists("opcache_invalidate") &&
+                @opcache_invalidate($f, true);
+            return true;
         }
     }
+}
+
+// ============================================================================
+// DISCOVERY - Automatic scanning and loading of modules/plugins
+// ============================================================================
+namespace Framework\Discovery {
+    use Framework\Cache\Driver;
 
     /**
-     * Holds metadata for a discovered Module (Service Provider).
+     * Module/Plugin definition from manifest.json
+     * Contains metadata about routes, dependencies, and capabilities
      */
-    final class ModuleDefinition
+    readonly class Definition
     {
-        private bool $loaded = false;
-        private ?AbstractModule $instance = null;
-
         public function __construct(
-            public readonly string $name,
-            public readonly string $className,
-            public readonly string $dirPath, // Path to directory containing Module.php
-            public readonly array $provides,
-            public readonly array $requires
-        ) {}
+            public string $name,
+            public string $class,
+            public string $path,
+            public array $routes = [],
+            public array $provides = [],      // Capabilities this provides
+            public array $requires = [],      // Module capabilities needed
+            public array $dependsOn = [],     // Plugin dependencies
+            public int $score = 100           // Provider priority (higher wins)
+        ) {
+        }
 
-        public static function fromArray(array $data): self {
+        public function toArray(): array
+        {
+            return get_object_vars($this);
+        }
+
+        public static function fromArray(array $d): self
+        {
             return new self(
-                $data['name'], 
-                $data['className'], 
-                $data['dirPath'], 
-                $data['provides'] ?? [], 
-                $data['requires'] ?? []
+                $d["name"],
+                $d["class"],
+                $d["path"],
+                $d["routes"] ?? [],
+                $d["provides"] ?? [],
+                $d["requires"] ?? [],
+                $d["dependsOn"] ?? [],
+                $d["score"] ?? 100
             );
         }
-        
-        public function toArray(): array {
-            return [
-                "name" => $this->name, 
-                "className" => $this->className, 
-                "dirPath" => $this->dirPath, 
-                "provides" => $this->provides, 
-                "requires" => $this->requires
-            ];
-        }
-
-        /**
-         * Lazy-loads the PHP file and returns a singleton instance of the Module.
-         */
-        public function instantiate(): AbstractModule {
-            if ($this->instance) return $this->instance;
-            
-            if (!$this->loaded) { 
-                $file = $this->dirPath . '/Module.php';
-                if (!file_exists($file)) throw new \RuntimeException("Module file missing: $file");
-                require_once $file; 
-                $this->loaded = true; 
-            }
-
-            if (!class_exists($this->className)) throw new \RuntimeException("Module class '{$this->className}' not found");
-            $instance = new ($this->className)();
-
-            if (!$instance instanceof AbstractModule) {
-                throw new \RuntimeException("Class '{$this->className}' must extend AbstractModule");
-            }
-            
-            return $this->instance = $instance;
-        }
-
-        public function setInstance(AbstractModule $instance): void { $this->instance = $instance; $this->loaded = true; }
-        public function isLoaded(): bool { return $this->loaded; }
-        public function isInstantiated(): bool { return $this->instance !== null; }
     }
-}
-
-// ---------------------------------------------------------
-// COMPONENT: DISCOVERY ENGINE
-// Scans directories, parses valid manifests, and caches the results.
-// ---------------------------------------------------------
-namespace Framework\Discovery {
-    use Framework\Cache\CacheDriverInterface;
 
     /**
-     * Base class for scanning and caching definitions.
+     * Scans directories for manifest.json files
+     * Builds and caches module/plugin definitions
      */
-    abstract class AbstractDiscovery
+    final class Scanner
     {
         public function __construct(
-            protected string $directory,
-            protected ?CacheDriverInterface $cache = null,
-            protected string $cacheKey = "discovery",
-            protected int $cacheTtl = 86400
-        ) {}
-
-        abstract protected function performColdBoot(): array;
-        abstract protected function hydrate(array $data): array;
+            private string $dir,
+            private ?Driver $cache = null,
+            private string $key = "disc",
+            private int $ttl = 86400
+        ) {
+        }
 
         /**
-         * Main entry point: tries cache first, then falls back to file-scanning (cold boot).
+         * Scan directory for manifests
+         * Returns cached results if available and not stale
          */
-        public function discover(bool $forceCold = false): array
+        public function scan(bool $force = false): array
         {
-            if (!$forceCold && $this->cache) {
-                $cached = $this->cache->get($this->cacheKey);
-                if ($cached && $this->validateCache($cached)) {
-                    return $this->hydrate($cached["data"]);
+            $hash = $this->hash();
+            
+            // Return cached if valid
+            if (
+                !$force &&
+                $this->cache &&
+                ($c = $this->cache->get($this->key)) &&
+                ($c["hash"] ?? "") === $hash
+            ) {
+                return array_map(Definition::fromArray(...), $c["data"]);
+            }
+
+            // Scan for manifest files
+            $defs = [];
+            foreach (glob("{$this->dir}/*/manifest.json") ?: [] as $f) {
+                $j = json_decode(file_get_contents($f), true);
+                if ($j && isset($j["name"], $j["className"])) {
+                    $defs[$j["name"]] = new Definition(
+                        $j["name"],
+                        $j["className"],
+                        dirname($f),
+                        $j["routes"] ?? [],
+                        $j["provides"] ?? [],
+                        $j["requires"] ?? [],
+                        $j["dependsOn"] ?? [],
+                        $j["providerScore"] ?? 100
+                    );
                 }
             }
 
-            $definitions = $this->performColdBoot();
-            $this->cacheDiscovery($definitions);
-            return $definitions;
-        }
-
-        public function invalidate(): void { $this->cache?->delete($this->cacheKey); }
-
-        /** Calculates a hash of file paths + mtimes to detect changes on disk. */
-        protected function computeHash(array $patterns): string {
-            $data = "";
-            foreach ($patterns as $pattern) {
-                foreach (glob($pattern) ?: [] as $file) { $data .= $file . filemtime($file); }
-            }
-            return md5($data);
-        }
-
-        /** Saves the discovered definitions to the cache driver. */
-        protected function cacheDiscovery(array $definitions): void {
-            if (!$this->cache) return;
-            $this->cache->set($this->cacheKey, [
-                "data" => array_map(fn($d) => $d->toArray(), $definitions),
-                "timestamp" => time(),
-                "hash" => $this->getCurrentHash(),
-            ], $this->cacheTtl);
-        }
-
-        protected function validateCache(array $cached): bool {
-            return isset($cached["hash"]) && $cached["hash"] === $this->getCurrentHash();
-        }
-
-        abstract protected function getCurrentHash(): string;
-    }
-
-    /**
-     * Discovery implementation for Modules (Extensions/Services).
-     */
-    final class ModuleDiscovery extends AbstractDiscovery
-    {
-        /** Scans directories for manifest.json and creates ModuleDefinitions. */
-        protected function performColdBoot(): array {
-            if (!is_dir($this->directory)) return [];
-            $definitions = [];
+            // Cache results with hash for invalidation
+            $this->cache?->set(
+                $this->key,
+                [
+                    "data" => array_map(fn($d) => $d->toArray(), $defs),
+                    "hash" => $hash,
+                ],
+                $this->ttl
+            );
             
-            $files = glob($this->directory . "/*/manifest.json") ?: [];
-            
-            foreach ($files as $file) {
-                $json = json_decode(file_get_contents($file), true);
-                if (!$json || !isset($json['name'], $json['className'])) continue;
-
-                $definitions[$json['name']] = new ModuleDefinition(
-                    $json['name'],
-                    $json['className'],
-                    dirname($file), 
-                    $json['provides'] ?? [],
-                    $json['requires'] ?? []
-                );
-            }
-            return $definitions;
+            return $defs;
         }
 
-        protected function hydrate(array $data): array {
-            return array_map(fn($d) => ModuleDefinition::fromArray($d), $data);
-        }
-
-        protected function getCurrentHash(): string {
-            return $this->computeHash([$this->directory . "/*/manifest.json"]);
-        }
-    }
-
-    /**
-     * Discovery implementation for Plugins (Route Endpoints).
-     */
-    final class PluginDiscovery extends AbstractDiscovery
-    {
-        /** Scans directories for manifest.json and creates PluginDefinitions. */
-        protected function performColdBoot(): array {
-            if (!is_dir($this->directory)) return [];
-            $definitions = [];
-
-            $files = glob($this->directory . "/*/manifest.json") ?: [];
-
-            foreach ($files as $file) {
-                $json = json_decode(file_get_contents($file), true);
-                if (!$json || !isset($json['name'], $json['className'])) continue;
-
-                $definitions[$json['name']] = new PluginDefinition(
-                    $json['name'],
-                    $json['className'],
-                    dirname($file),
-                    $json['routes'] ?? [],
-                    $json['provides'] ?? [],
-                    $json['requires'] ?? [],
-                    $json['dependsOn'] ?? [],
-                    $json['providerScore'] ?? 100
-                );
-            }
-            return $definitions;
-        }
-
-        protected function hydrate(array $data): array {
-            return array_map(fn($d) => PluginDefinition::fromArray($d), $data);
-        }
-
-        protected function getCurrentHash(): string {
-            return $this->computeHash([$this->directory . "/*/manifest.json"]);
+        /**
+         * Generate hash of all manifest files (for cache invalidation)
+         */
+        private function hash(): string
+        {
+            return md5(
+                implode(
+                    "",
+                    array_map(
+                        fn($f) => $f . filemtime($f),
+                        glob("{$this->dir}/*/manifest.json") ?: []
+                    )
+                )
+            );
         }
     }
 }
 
-// ---------------------------------------------------------
-// COMPONENT: ROUTER
-// Compiles routes from plugins into regex/static maps for fast matching.
-// ---------------------------------------------------------
+// ============================================================================
+// ROUTING - URL pattern matching and parameter extraction
+// ============================================================================
 namespace Framework\Router {
-    /**
-     * Value object representing a single compiled route.
-     */
-    final readonly class Route
-    {
-        use \Framework\Discovery\SerializableTrait;
-        public function __construct(
-            public string $pattern,
-            public string $regex,
-            public array $methods,
-            public array $paramNames,
-            public string $pluginName
-        ) {}
-    }
+    use Framework\Discovery\Definition;
 
     /**
-     * Handles route compilation and matching.
+     * HTTP router with static, dynamic, and regex route support
+     * Routes requests to appropriate plugins
      */
-    final class CompiledRouter
+    final class Router
     {
-        private array $routes = [];
-        private array $staticRoutes = []; // O(1) Lookup for routes without params
-        private array $dynamicRoutes = []; // Regex iteration for routes with params
+        private array $static = [],   // Fast lookup for static routes
+            $dynamic = [],            // Routes with parameters
+            $routes = [];             // All route definitions
 
         /**
-         * Ingests a PluginDefinition and compiles its route patterns.
+         * Register routes from a plugin definition
          */
-        public function addFromDefinition(\Framework\Discovery\PluginDefinition $def): void
+        public function add(Definition $def): void
         {
-            foreach ($def->routes as $pattern => $methods) {
-                $methods = (array)$methods;
-                $compiled = $this->compilePattern(is_int($pattern) ? $methods[0] : $pattern);
-
-                $this->routes[] = new Route(
-                    $pattern, $compiled["regex"], $methods, $compiled["params"], $def->name
-                );
-                $index = count($this->routes) - 1;
-
-                foreach ($methods as $method) {
-                    if ($compiled["static"]) {
-                        $this->staticRoutes[$method][$pattern] = $index;
-                    } else {
-                        $this->dynamicRoutes[$method][] = $index;
-                    }
+            foreach ($def->routes as $pat => $methods) {
+                $methods = (array) $methods;
+                $pat = is_int($pat) ? $methods[0] : $pat;
+                [$regex, $params, $isStatic] = $this->compile($pat);
+                
+                $this->routes[] = $r = [
+                    "pattern" => $pat,
+                    "regex" => $regex,
+                    "methods" => $methods,
+                    "params" => $params,
+                    "plugin" => $def->name,
+                ];
+                
+                $idx = count($this->routes) - 1;
+                
+                // Store in static or dynamic index
+                foreach ($methods as $m) {
+                    $isStatic
+                        ? ($this->static[$m][$pat] = $idx)
+                        : ($this->dynamic[$m][] = $idx);
                 }
             }
         }
 
         /**
-         * Transforms path patterns (e.g., /user/{id}) into Regex.
+         * Compile route pattern to regex
+         * Returns [regex, param_names, is_static]
          */
-        private function compilePattern(string $pattern): array
+        private function compile(string $p): array
         {
-            // If it starts with regex delimiters, treat as raw regex
-            if (preg_match("/^[#~^]/", $pattern)) return ["regex" => $pattern, "params" => [], "static" => false];
-            // If no curly braces, it's a static string matching
-            if (!str_contains($pattern, "{")) return ["regex" => $pattern, "params" => [], "static" => true];
-
+            // Already a regex pattern
+            if (preg_match("/^[#~^]/", $p)) {
+                return [$p, [], false];
+            }
+            
+            // Static route (no parameters)
+            if (!str_contains($p, "{")) {
+                return [$p, [], true];
+            }
+            
+            // Dynamic route - extract parameters
             $params = [];
             $regex = preg_replace_callback(
-                "/\{(\w+)(?::([^}]+))?\}/",
-                function ($m) use (&$params) { $params[] = $m[1]; return "(" . ($m[2] ?? "[^/]+") . ")"; },
-                $pattern
+                "/\{(\w+)(?::([^}]+))?}/",
+                fn($m) => ($params[] = $m[1])
+                    ? "(" . ($m[2] ?? "[^/]+") . ")"
+                    : "",
+                $p
             );
-
-            return ["regex" => "#^" . $regex . '$#', "params" => $params, "static" => false];
+            
+            return ["#^{$regex}$#", $params, false];
         }
 
         /**
-         * Finds a matching route for the URI and Method.
+         * Match URI and method to a route
+         * Returns route info and extracted parameters
          */
         public function match(string $uri, string $method): ?array
         {
-            // Try O(1) static lookup first
-            $idx = $this->staticRoutes[$method][$uri] ?? $this->staticRoutes["*"][$uri] ?? null;
-            if ($idx !== null) return ["route" => $this->routes[$idx], "params" => []];
-
-            // Fallback to regex iteration
-            $candidates = array_merge($this->dynamicRoutes[$method] ?? [], $this->dynamicRoutes["*"] ?? []);
-            foreach ($candidates as $idx) {
-                $route = $this->routes[$idx];
-                if (preg_match($route->regex, $uri, $matches)) {
-                    array_shift($matches);
-                    return ["route" => $route, "params" => array_combine($route->paramNames, $matches)];
+            // Try static routes first (fastest)
+            if (
+                ($i =
+                    $this->static[$method][$uri] ??
+                    ($this->static["*"][$uri] ?? null)) !== null
+            ) {
+                return ["route" => $this->routes[$i], "params" => []];
+            }
+            
+            // Try dynamic routes
+            foreach (
+                [...$this->dynamic[$method] ?? [], ...$this->dynamic["*"] ?? []]
+                as $i
+            ) {
+                if (preg_match($this->routes[$i]["regex"], $uri, $m)) {
+                    return [
+                        "route" => $this->routes[$i],
+                        "params" => array_combine(
+                            $this->routes[$i]["params"],
+                            array_slice($m, 1)
+                        ),
+                    ];
                 }
             }
+            
             return null;
         }
     }
 }
 
-// ---------------------------------------------------------
-// COMPONENT: GRAPH UTILITIES
-// Handles dependency resolution and sorting.
-// ---------------------------------------------------------
+// ============================================================================
+// DEPENDENCY GRAPH - Topological sorting and provider resolution
+// ============================================================================
 namespace Framework\Graph {
-    final readonly class Node {
-        public function __construct(public string $id, public array $dependencies = [], public mixed $data = null) {}
-    }
-
     /**
-     * Represents dependencies between system components.
-     * Can resolve abstract requirements (Capabilities) to concrete providers.
+     * Dependency graph resolver
+     * Handles transitive dependencies and topological sorting
      */
-    final class DependencyGraph
+    final class Resolver
     {
-        private array $nodes = [];
-        private array $providers = []; // Map of Capability => [NodeIDs]
+        private array $nodes = [],        // All registered nodes
+            $providers = [];              // Capability -> providers map
 
-        /** Adds a node (Extension) and registers what it provides. */
-        public function addNode(string $id, array $dependencies, array $provides, mixed $data = null): void {
-            $this->nodes[$id] = new Node($id, $dependencies, $data);
-            foreach ($provides as $cap) $this->providers[$cap][] = $id;
+        /**
+         * Register a node with its dependencies and capabilities
+         */
+        public function add(
+            string $id,
+            array $deps,
+            array $provides,
+            mixed $data = null
+        ): void {
+            $this->nodes[$id] = ["deps" => $deps, "data" => $data];
+            
+            // Register as provider for each capability
+            foreach ($provides as $c) {
+                $this->providers[$c][] = $id;
+            }
         }
 
         /**
-         * Resolves dependencies and returns a topologically sorted list.
+         * Resolve dependencies into load order
+         * Returns topologically sorted array and any missing dependencies
          */
-        public function resolve(array $requirements, ?callable $scorer = null, bool $allowMissing = false): array
-        {
-            $needed = []; 
-            $missing = [];
-            // Recursively find all nodes needed to satisfy requirements
-            $this->collect($requirements, $needed, $missing, $scorer, $allowMissing);
+        public function resolve(
+            array $reqs,
+            ?callable $scorer = null,
+            bool $allowMissing = false
+        ): array {
+            $needed = $missing = [];
+            $this->collect($reqs, $needed, $missing, $scorer, $allowMissing);
 
-            // build a temporary subgraph of only the needed nodes
-            $subgraph = [];
+            // Build subgraph of only needed nodes
+            $sub = [];
             foreach (array_keys($needed) as $id) {
-                $node = $this->nodes[$id];
-                $resolvedDeps = [];
-                foreach ($node->dependencies as $dep) {
-                    $p = $this->findProvider($dep, $scorer);
-                    if ($p && isset($needed[$p])) $resolvedDeps[] = $p;
-                    elseif ($allowMissing) $missing[] = $dep;
+                $resolved = [];
+                foreach ($this->nodes[$id]["deps"] as $d) {
+                    if (
+                        ($p = $this->provider($d, $scorer)) &&
+                        isset($needed[$p])
+                    ) {
+                        $resolved[] = $p;
+                    } elseif ($allowMissing) {
+                        $missing[] = $d;
+                    }
                 }
-                $subgraph[$id] = new Node($id, array_unique($resolvedDeps), $node->data);
+                $sub[$id] = array_unique($resolved);
             }
 
             return [
-                "order" => (new TopologicalSorter())->sort($subgraph),
-                "missing" => array_unique($missing)
+                "order" => $this->topo($sub),
+                "missing" => array_unique($missing),
             ];
         }
 
-        /** Recursive helper to traverse dependencies. */
-        private function collect(array $reqs, array &$needed, array &$missing, ?callable $scorer, bool $allowMissing): void {
-            foreach ($reqs as $req) {
-                $p = $this->findProvider($req, $scorer);
-                if (!$p) {
-                    if (!$allowMissing) throw new \RuntimeException("Unsatisfied dependency: $req");
-                    $missing[] = $req; continue;
+        /**
+         * Recursively collect all needed nodes
+         */
+        private function collect(
+            array $reqs,
+            array &$needed,
+            array &$missing,
+            ?callable $scorer,
+            bool $allow
+        ): void {
+            foreach ($reqs as $r) {
+                if (!($p = $this->provider($r, $scorer))) {
+                    $allow
+                        ? ($missing[] = $r)
+                        : throw new \RuntimeException("Unmet: $r");
+                    continue;
                 }
-                if (isset($needed[$p])) continue;
-                $needed[$p] = true;
-                $this->collect($this->nodes[$p]->dependencies, $needed, $missing, $scorer, $allowMissing);
+                
+                if (!isset($needed[$p])) {
+                    $needed[$p] = true;
+                    // Recursively collect dependencies
+                    $this->collect(
+                        $this->nodes[$p]["deps"],
+                        $needed,
+                        $missing,
+                        $scorer,
+                        $allow
+                    );
+                }
             }
         }
 
-        /** Finds the best provider for a capability, optionally using a scoring function. */
-        private function findProvider(string $cap, ?callable $scorer): ?string {
-            $c = $this->providers[$cap] ?? [];
-            if (count($c) <= 1) return $c[0] ?? null;
-            if (!$scorer) return $c[0];
-            usort($c, fn($a, $b) => $scorer($this->nodes[$b]) <=> $scorer($this->nodes[$a]));
-            return $c[0];
+        /**
+         * Find best provider for a capability
+         * Uses scorer function if multiple providers exist
+         */
+        private function provider(string $c, ?callable $s): ?string {
+            $p = $this->providers[$c] ?? [];
+
+            if (count($p) === 0) return null;
+            if (count($p) === 1) return $p[0];
+    
+            // Multiple providers - score them
+            if (!$s) return $p[0];
+    
+            // Sort by score (higher is better)
+            usort($p, function($a, $b) use ($s) {
+                $scoreA = $s($this->nodes[$a]['data'] ?? null);
+                $scoreB = $s($this->nodes[$b]['data'] ?? null);
+                return $scoreB <=> $scoreA;
+            });
+    
+            return $p[0];
         }
-    }
 
-    /**
-     * Sorts nodes so that dependencies always come before dependents.
-     */
-    final class TopologicalSorter {
-        public function sort(array $nodes): array {
-            $inDegree = array_fill_keys(array_keys($nodes), 0);
-            $adj = array_fill_keys(array_keys($nodes), []);
-
-            // Build Adjacency List
-            foreach ($nodes as $id => $node) {
-                foreach ($node->dependencies as $dep) {
-                    if (isset($inDegree[$dep])) { $adj[$dep][] = $id; $inDegree[$id]++; }
+        /**
+         * Topological sort using Kahn's algorithm
+         * Detects circular dependencies
+         */
+        private function topo(array $nodes): array
+        {
+            // Calculate in-degree for each node
+            $in = array_fill_keys($k = array_keys($nodes), 0);
+            $adj = array_fill_keys($k, []);
+            
+            foreach ($nodes as $id => $deps) {
+                foreach ($deps as $d) {
+                    if (isset($in[$d])) {
+                        $adj[$d][] = $id;
+                        $in[$id]++;
+                    }
                 }
             }
-
-            // Kahn's Algorithm
-            $queue = [];
-            foreach ($inDegree as $id => $d) if ($d === 0) $queue[] = $id;
-
-            $sorted = [];
-            while ($queue) {
-                $u = array_shift($queue);
-                $sorted[] = $u;
-                foreach ($adj[$u] as $v) if (--$inDegree[$v] === 0) $queue[] = $v;
+            
+            // Start with nodes that have no dependencies
+            $q = array_keys(array_filter($in, fn($d) => $d === 0));
+            $out = [];
+            
+            while ($q) {
+                $u = array_shift($q);
+                $out[] = $u;
+                
+                foreach ($adj[$u] as $v) {
+                    if (--$in[$v] === 0) {
+                        $q[] = $v;
+                    }
+                }
             }
-
-            if (count($sorted) !== count($nodes)) throw new \RuntimeException("Circular dependency detected");
-            return $sorted;
+            
+            // If not all nodes processed, there's a cycle
+            count($out) === count($nodes) ||
+                throw new \RuntimeException("Circular dependency");
+            
+            return $out;
         }
     }
 }
 
-// ---------------------------------------------------------
-// COMPONENT: CACHE (OPCache Optimized)
-// ---------------------------------------------------------
-namespace Framework\Cache {
-    interface CacheDriverInterface {
-        public function get(string $key): mixed;
-        public function set(string $key, mixed $value, int $ttl = 3600): bool;
-        public function delete(string $key): bool;
-        public function clear(): bool;
-    }
-
-    /**
-     * Stores cache items as native PHP files containing arrays.
-     * This allows the OS to cache file reads and PHP's OPCache to cache the compiled array data.
-     */
-    final class PhpNativeDriver implements CacheDriverInterface
-    {
-        public function __construct(private string $dir) {
-            if (!is_dir($dir) && !@mkdir($dir, 0755, true)) {
-                throw new \RuntimeException("Cannot create cache dir: $dir");
-            }
-        }
-
-        private function p(string $k): string { 
-            return $this->dir . "/" . md5($k) . ".php"; 
-        }
-
-        public function get(string $key): mixed {
-            $f = $this->p($key);
-            if (!file_exists($f)) return null;
-
-            try {
-                $data = require $f;
-            } catch (\Throwable) {
-                return null;
-            }
-
-            if (!is_array($data) || ($data["exp"] !== 0 && $data["exp"] < time())) {
-                $this->delete($key);
-                return null;
-            }
-            return $data["val"];
-        }
-
-        public function set(string $key, mixed $val, int $ttl = 3600): bool {
-            $f = $this->p($key);
-            $tmp = $f . uniqid('', true) . '.tmp';
-            
-            $exp = $ttl > 0 ? time() + $ttl : 0;
-            // Write a valid PHP file that returns the array
-            $code = "<?php return " . var_export(["val" => $val, "exp" => $exp], true) . ";";
-            
-            if (file_put_contents($tmp, $code) === false) return false;
-            
-            // Atomic rename to ensure we don't read partial files
-            if (rename($tmp, $f)) {
-                // IMPORTANT: Tell PHP to re-compile this file if it was already cached in memory
-                if (function_exists('opcache_invalidate')) {
-                    @opcache_invalidate($f, true);
-                }
-                return true;
-            }
-            @unlink($tmp);
-            return false;
-        }
-
-        public function delete(string $key): bool {
-            $f = $this->p($key);
-            if (file_exists($f)) {
-                $res = @unlink($f);
-                if ($res && function_exists('opcache_invalidate')) {
-                    @opcache_invalidate($f, true);
-                }
-                return $res;
-            }
-            return true;
-        }
-
-        public function clear(): bool {
-            $files = glob($this->dir . "/*.php");
-            foreach ($files as $f) {
-                @unlink($f);
-                if (function_exists('opcache_invalidate')) @opcache_invalidate($f, true);
-            }
-            return true;
-        }
-    }
-}
-
-// ---------------------------------------------------------
-// COMPONENT: CONTRACTS & BASE
-// Base classes for the user to extend.
-// ---------------------------------------------------------
-namespace Framework\Base {
-    use Framework\Core\{ServiceRegistry, ExecutionContext, Config};
-    use Framework\Http\Response;
-
-    /**
-     * Base for Service Providers / Modules.
-     * Used to register services into the container.
-     */
-    abstract class AbstractModule {
-        protected bool $booted = false;
-        abstract public function boot(ServiceRegistry $registry, Config $config): void;
-        abstract public function terminate(): void;
-        public function isBooted(): bool { return $this->booted; }
-    }
-
-    /**
-     * Base for Logic / Route Handlers.
-     * Used to execute business logic and return responses.
-     */
-    abstract class AbstractPlugin {
-        protected array $missingCapabilities = [];
-        abstract public function execute(ExecutionContext $ctx, ServiceRegistry $services): ?Response;
-        public function validate(): bool { return true; }
-        public static function getProviderScore(): int { return 100; }
-        public function setMissing(array $caps): void { $this->missingCapabilities = $caps; }
-    }
-}
-
-// ---------------------------------------------------------
-// COMPONENT: CORE
-// The glue that holds the system together.
-// ---------------------------------------------------------
+// ============================================================================
+// CORE - Main framework classes
+// ============================================================================
 namespace Framework\Core {
     use Framework\Http\{Request, Response};
-    use Framework\Discovery\{ModuleDefinition, PluginDefinition};
-    use Framework\Graph\DependencyGraph;
-    use Framework\Log\LoggerInterface;
+    use Framework\Discovery\{Definition, Scanner};
+    use Framework\Graph\Resolver;
+    use Framework\Router\Router;
+    use Framework\Cache\Driver;
+    use Framework\Log\Logger;
 
     /**
-     * A state object passed through the plugin execution chain.
-     * Allows plugins to inspect the request, share data, or halt execution.
+     * Base class for modules (shared services)
+     * Modules are booted once and provide services to plugins
      */
-    final class ExecutionContext {
-        private array $caps = [];
-        private bool $halted = false;
-        private ?Response $earlyResponse = null;
-
-        public function __construct(private Request $req) {}
-        public function getRequest(): Request { return $this->req; }
-        public function setRequestAttribute(string $k, mixed $v): void { $this->req = $this->req->withAttribute($k, $v); }
-        public function provide(string $k, mixed $v): void { $this->caps[$k] = $v; }
-        public function consume(string $k, mixed $default = null): mixed { return $this->caps[$k] ?? $default; }
+    abstract class Module
+    {
+        protected bool $booted = false;
         
-        /** Stops the specific plugin chain and prepares an immediate response. */
-        public function halt(string $reason, int $code = 403): void { 
-            $this->halted = true; 
-            $this->earlyResponse = new Response("<h1>Halted</h1><p>$reason</p>", $code); 
-        }
-        public function isHalted(): bool { return $this->halted; }
-        public function getEarlyResponse(): ?Response { return $this->earlyResponse; }
-    }
-
-    /**
-     * A Simple Service Locator (Singleton) for global access to booted Module services.
-     */
-    final class ServiceRegistry {
-        private static ?self $instance = null;
-        private array $resolvers = [];
-        private array $instances = [];
-
-        public static function getInstance(): self { return self::$instance ??= new self(); }
-        public function bind(string $name, callable $resolver): void { $this->resolvers[$name] = $resolver; }
-        public function get(string $name): object {
-            return $this->instances[$name] ??= ($this->resolvers[$name] ?? throw new \RuntimeException("Service '$name' not found"))();
+        abstract public function boot(Services $s, Config $c): void;
+        abstract public function terminate(): void;
+        
+        public function isBooted(): bool
+        {
+            return $this->booted;
         }
     }
 
     /**
-     * manages the set of discovered Definitions, the Node Graph, and the Router.
+     * Base class for plugins (request handlers)
+     * Plugins process requests and return responses
      */
-    final class Registry {
-        private array $definitions = [];
-        private array $instances = [];
-        private DependencyGraph $graph;
-        private ?\Framework\Router\CompiledRouter $router = null;
+    abstract class Plugin
+    {
+        protected array $missing = [];
+        
+        abstract public function execute(Context $ctx, Services $s): ?Response;
+        
+        public function validate(): bool
+        {
+            return true;
+        }
+        
+        public function setMissing(array $m): void
+        {
+            $this->missing = $m;
+        }
+    }
 
-        public function __construct(bool $isPluginRegistry) {
-            $this->graph = new DependencyGraph();
-            // Only Plugins need routing capabilities
-            if ($isPluginRegistry) $this->router = new \Framework\Router\CompiledRouter();
+    /**
+     * Request context that flows through plugin chain
+     * Allows plugins to share data and control execution flow
+     */
+    final class Context
+    {
+        private array $caps = [];          // Shared capabilities
+        private bool $halted = false;      // Execution stopped?
+        private ?Response $early = null;   // Early response (if halted)
+
+        public function __construct(private Request $req)
+        {
         }
 
-        /** Register definition and add it to the dependency graph */
-        public function register($definition): void {
-            $this->definitions[$definition->name] = $definition;
-            if ($definition instanceof PluginDefinition) {
-                $dependencies = $definition->dependsOn;
-            } else {
-                $dependencies = $definition->requires;
+        public function request(): Request
+        {
+            return $this->req;
+        }
+
+        /**
+         * Add attribute to request (creates new immutable request)
+         */
+        public function attr(string $k, mixed $v): void
+        {
+            $this->req = $this->req->with("attributes", $k, $v);
+        }
+
+        /**
+         * Provide capability for other plugins to consume
+         */
+        public function provide(string $k, mixed $v): void
+        {
+            $this->caps[$k] = $v;
+        }
+
+        /**
+         * Consume capability provided by previous plugin
+         */
+        public function consume(string $k, mixed $d = null): mixed
+        {
+            return $this->caps[$k] ?? $d;
+        }
+
+        /**
+         * Halt plugin chain execution with reason
+         */
+        public function halt(string $r, int $c = 403): void
+        {
+            $this->halted = true;
+            $this->early = Response::html("<h1>Halted</h1><p>$r</p>", $c);
+        }
+
+        public function isHalted(): bool
+        {
+            return $this->halted;
+        }
+
+        public function earlyResponse(): ?Response
+        {
+            return $this->early;
+        }
+    }
+
+    /**
+     * Service container (singleton pattern)
+     * Manages lazy-loaded service dependencies
+     */
+    final class Services
+    {
+        private static ?self $i = null;
+        private array $r = [],             // Resolvers (factories)
+            $c = [];                       // Cached instances
+
+        public static function get(): self
+        {
+            return self::$i ??= new self();
+        }
+
+        /**
+         * Bind service factory
+         */
+        public function bind(string $n, callable $f): void
+        {
+            $this->r[$n] = $f;
+        }
+
+        /**
+         * Resolve service (creates singleton on first call)
+         */
+        public function resolve(string $n): object
+        {
+            return $this->c[$n] ??= ($this->r[$n] ??
+                throw new \RuntimeException("Missing: $n"))();
+        }
+    }
+
+    /**
+     * Configuration container
+     * Holds application settings
+     */
+    final class Config
+    {
+        public function __construct(private array $d = [])
+        {
+        }
+
+        public function get(string $k, mixed $d = null): mixed
+        {
+            return $this->d[$k] ?? $d;
+        }
+    }
+
+    /**
+     * Registry for modules and plugins
+     * Manages definitions, instances, and dependency resolution
+     */
+    final class Registry
+    {
+        private array $defs = [],          // Definitions by name
+            $inst = [];                    // Cached instances
+        public Resolver $graph;
+        public ?Router $router;
+
+        public function __construct(bool $routing)
+        {
+            $this->graph = new Resolver();
+            $this->router = $routing ? new Router() : null;
+        }
+
+        /**
+         * Register a definition in the registry
+         */
+        public function add(Definition $d): void
+        {
+            $this->defs[$d->name] = $d;
+            $this->graph->add(
+                $d->name,
+                $d->dependsOn ?: $d->requires,
+                $d->provides,
+                $d
+            );
+            $this->router?->add($d);
+        }
+
+        /**
+         * Get or create instance for a definition
+         */
+        public function instance(string $n): ?object
+        {
+            if (isset($this->inst[$n])) {
+                return $this->inst[$n];
             }
-            $this->graph->addNode($definition->name, $dependencies, $definition->provides, $definition);
-            if ($this->router && $definition instanceof PluginDefinition) $this->router->addFromDefinition($definition);
-        }
-
-        public function get(string $name) {
-            return $this->instances[$name] ??= $this->definitions[$name]?->instantiate();
-        }
-
-        public function getGraph(): DependencyGraph { return $this->graph; }
-        public function getRouter(): ?\Framework\Router\CompiledRouter { return $this->router; }
-        
-        /** Resolves module load order based on capabilities */
-        public function resolveModules(array $reqs): array {
-            $res = $this->graph->resolve($reqs);
-            return ["order" => $res["order"]];
-        }
-
-        /** Resolves a specific Plugin target and its entire dependency chain */
-        public function resolvePluginChain(string $target): array {
-            $def = $this->definitions[$target] ?? throw new \RuntimeException("Plugin '$target' not found");
-            // Resolve plugin-to-plugin dependencies
-            $res = $this->graph->resolve($def->dependsOn, fn($n) => $n->data->providerScore, true);
             
-            // Collect all module requirements from the computed plugin chain
-            $reqs = $def->requires;
-            foreach($res["order"] as $p) $reqs = array_merge($reqs, $this->definitions[$p]->requires);
+            $d = $this->defs[$n] ?? null;
+            if (
+                !$d ||
+                !file_exists(
+                    $f =
+                        "{$d->path}/" .
+                        ($this->router ? "Plugin" : "Module") .
+                        ".php"
+                )
+            ) {
+                return null;
+            }
+            
+            require_once $f;
+            return class_exists($d->class)
+                ? ($this->inst[$n] = new $d->class())
+                : null;
+        }
 
+        public function def(string $n): ?Definition
+        {
+            return $this->defs[$n] ?? null;
+        }
+
+        /**
+         * Build execution chain for a plugin
+         * Returns chain order, required modules, and missing deps
+         */
+        public function chain(string $t): array
+        {
+            $d =
+                $this->defs[$t] ?? throw new \RuntimeException("Not found: $t");
+            
+            // Resolve plugin dependencies
+            $r = $this->graph->resolve(
+                $d->dependsOn,
+                fn($n) => $n->score,
+                true
+            );
+            
+            // Collect module requirements from entire chain
+            $reqs = $d->requires;
+            foreach ($r["order"] as $p) {
+                $reqs = [...$reqs, ...$this->defs[$p]->requires];
+            }
+            
             return [
-                "chain" => [...$res["order"], $target],
+                "chain" => [...$r["order"], $t],
                 "modules" => array_unique($reqs),
-                "missing" => $res["missing"]
+                "missing" => $r["missing"],
             ];
         }
     }
 
     /**
-     * Determines execution plan without booting the system (can be cached).
-     */
-    final class Sandbox {
-        public function __construct(private Registry $plugins, private Registry $modules) {}
-
-        public function run(Request $request, ?\Framework\Cache\CacheDriverInterface $cache): array {
-            $match = $this->plugins->getRouter()->match($request->getUri(), $request->getMethod());
-            if (!$match) return ["found" => false];
-
-            // Try to fetch the execution plan from cache based on route pattern
-            $cacheKey = "plan:" . $request->getMethod() . ":" . $match["route"]->pattern;
-            $plan = $cache?->get($cacheKey);
-
-            if (!$plan) {
-                // Determine which Plugins run (Middleware + Handler)
-                $chain = $this->plugins->resolvePluginChain($match["route"]->pluginName);
-                // Determine which Modules are needed by those plugins
-                $modules = $this->modules->resolveModules($chain["modules"]);
-                
-                $plan = [
-                    "handler" => $match["route"]->pluginName, 
-                    "plugins" => $chain["chain"], 
-                    "modules" => $modules["order"], 
-                    "missing" => $chain["missing"]
-                ];
-                $cache?->set($cacheKey, $plan);
-            }
-
-            return ["found" => true, "plan" => $plan, "params" => $match["params"]];
-        }
-    }
-
-    /** Simple configuration container. */
-    final class Config {
-        public function __construct(private array $s = []) {}
-        public function get(string $k, mixed $d = null): mixed { return $this->s[$k] ?? $d; }
-    }
-
-    /**
-     * The Heart of the Application.
-     * Orchestrates checking the request, discovering extensions, planning execution, and booting.
+     * Main application kernel
+     * Orchestrates discovery, routing, and request handling
      */
     final class Kernel
     {
-        private Registry $modules;
-        private Registry $plugins;
-        private \Framework\Cache\CacheDriverInterface $cache;
-        private ?LoggerInterface $logger = null;
-        private array $booted = [];
+        private Registry $mods, $plugs;
+        private ?Driver $cache = null;
+        private ?Logger $log = null;
+        private array $booted = [];        // Track booted modules for cleanup
 
-        public function __construct(private Config $config) {
-            $this->modules = new Registry(false);
-            $this->plugins = new Registry(true);
+        public function __construct(private Config $cfg)
+        {
+            $this->mods = new Registry(false);   // Modules don't need routing
+            $this->plugs = new Registry(true);   // Plugins use routing
         }
 
-        public function setCache(\Framework\Cache\CacheDriverInterface $c): void { $this->cache = $c; }
-        public function setLogger(LoggerInterface $l): void { $this->logger = $l; }
-
-        /** Discovers all Modules and Plugins from disk. */
-        public function discover(string $modDir, string $plgDir): void {
-            $modDisc = new \Framework\Discovery\ModuleDiscovery($modDir, $this->cache, "disc_modules");
-            foreach ($modDisc->discover() as $d) $this->modules->register($d);
-            $plgDisc = new \Framework\Discovery\PluginDiscovery($plgDir, $this->cache, "disc_plugins");
-            foreach ($plgDisc->discover() as $d) $this->plugins->register($d);
+        public function setCache(Driver $c): void
+        {
+            $this->cache = $c;
         }
 
-        private function parseSize(string $size): int {
-            $unit = preg_replace('/[^bkmgtpezy]/i', '', $size);
-            $size = preg_replace('/[^0-9\.]/', '', $size); 
-            return (int) ($size * pow(1024, stripos('bkmgtpezy', $unit[0] ?? 'b')));
+        public function setLogger(Logger $l): void
+        {
+            $this->log = $l;
         }
 
-        /** Main execution method. */
-        public function run(): void {
-            $isDebug = $this->config->get("debug", false);
+        /**
+         * Discover and register all modules and plugins
+         */
+        public function discover(string $modDir, string $plgDir): void
+        {
+            foreach (
+                (new Scanner($modDir, $this->cache, "disc_mod"))->scan()
+                as $d
+            ) {
+                $this->mods->add($d);
+            }
+            
+            foreach (
+                (new Scanner($plgDir, $this->cache, "disc_plg"))->scan()
+                as $d
+            ) {
+                $this->plugs->add($d);
+            }
+        }
+
+        /**
+         * Main request handling loop
+         * 1. Gate (validate request)
+         * 2. Route (find handler)
+         * 3. Plan (resolve dependencies)
+         * 4. Boot (initialize modules)
+         * 5. Execute (run plugin chain)
+         * 6. Respond (send output)
+         * 7. Cleanup (terminate modules)
+         */
+        public function run(): void
+        {
+            $debug = $this->cfg->get("debug", false);
             
             try {
-                // 1. Strict Request Gatekeeping (Security)
-                $len = (int)($_SERVER['CONTENT_LENGTH'] ?? 0);
-                $type = $_SERVER['CONTENT_TYPE'] ?? '';
-                $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
-                $appLimit = 2097152; // Hard limit 2MB
-                $phpLimit = $this->parseSize(ini_get('post_max_size'));
-
-                // Block oversize requests before processing
-                if ($len > $appLimit || ($phpLimit > 0 && $len > $phpLimit)) {
-                    throw new \Exception("Payload Too Large", 413);
-                }
-
-                // Block malformed POST/PUT requests
-                if (in_array($method, ['POST', 'PUT', 'PATCH'])) {
-                    if ($len === 0 && !str_contains($_SERVER['HTTP_TRANSFER_ENCODING'] ?? '', 'chunked')) {
-                        throw new \Exception("Length Required", 411);
-                    }
-                    if (str_starts_with($type, 'multipart/form-data') && !str_contains($type, 'boundary=')) {
-                        throw new \Exception("Malformed Multipart Request", 400);
-                    }
-                }
-
-                // 2. Routing and Planning
+                // Validate incoming request
+                $this->gate();
+                
+                // Capture request from globals
                 $req = Request::capture();
-                $sandbox = new Sandbox($this->plugins, $this->modules);
                 
-                $res = $sandbox->run($req, $this->cache);
-                if (!$res["found"]) { (new Response("Not Found", 404))->send(); return; }
+                // Find matching route
+                $match =
+                    $this->plugs->router->match($req->uri, $req->method) ??
+                    throw new \Exception("Not Found", 404);
 
-                $plan = $res["plan"];
-                $req = $req->withAttributes($res["params"]);
+                // Build or retrieve cached execution plan
+                $plan =
+                    $this->cache?->get(
+                        $ck = "plan:{$req->method}:{$match["route"]["pattern"]}"
+                    ) ??
+                    (function () use ($match, $ck) {
+                        $chain = $this->plugs->chain($match["route"]["plugin"]);
+                        $plan = [
+                            "handler" => $match["route"]["plugin"],
+                            "plugins" => $chain["chain"],
+                            "modules" => $this->mods->graph->resolve(
+                                $chain["modules"]
+                            )["order"],
+                            "missing" => $chain["missing"],
+                        ];
+                        $this->cache?->set($ck, $plan);
+                        return $plan;
+                    })();
 
-                // 3. Boot Required Modules (Dependency Injection)
-                foreach ($plan["modules"] as $mName) {
-                    $m = $this->modules->get($mName);
-                    if (!$m->isBooted()) { $m->boot(ServiceRegistry::getInstance(), $this->config); $this->booted[] = $m; }
+                // Add route parameters to request
+                $req = $req->with("attributes", $match["params"]);
+                
+                // Boot required modules
+                foreach ($plan["modules"] as $m) {
+                    if ($mod = $this->mods->instance($m)) {
+                        if (!$mod->isBooted()) {
+                            $mod->boot(Services::get(), $this->cfg);
+                            $this->booted[] = $mod;
+                        }
+                    }
                 }
 
-                // 4. Execute Plugin Chain (Middleware & Controller)
-                $ctx = new ExecutionContext($req);
-                $response = null;
-
-                foreach ($plan["plugins"] as $pName) {
-                    $p = $this->plugins->get($pName);
-
-                    // If plugin is null just continue
-                    if (!$p) continue;
-                    $p->setMissing($plan["missing"]);
-                    if (!$p->validate()) throw new \Exception("Plugin $pName failed validation");
+                // Execute plugin chain
+                $ctx = new Context($req);
+                $resp = null;
+                
+                foreach ($plan["plugins"] as $p) {
+                    if (!($plg = $this->plugs->instance($p))) {
+                        continue;
+                    }
                     
-                    $out = $p->execute($ctx, ServiceRegistry::getInstance());
+                    $plg->setMissing($plan["missing"]);
+                    $plg->validate() ||
+                        throw new \Exception("Validation failed: $p");
                     
-                    // Stop if a plugin (middleware) halted execution
-                    if ($ctx->isHalted()) { $response = $ctx->getEarlyResponse(); break; }
-                    if ($out instanceof Response) { $response = $out; break; }
+                    // Execute plugin, stop if response or halted
+                    if (
+                        ($resp = $plg->execute($ctx, Services::get())) ||
+                        $ctx->isHalted()
+                    ) {
+                        $resp ??= $ctx->earlyResponse();
+                        break;
+                    }
                 }
-
-                ($response ?? new Response("Internal Error", 500))->send();
-
+                
+                // Send response
+                ($resp ?? new Response("Internal Error", 500))->send();
+                
             } catch (\Throwable $e) {
-                // Error Handling
-                $code = $e->getCode() >= 400 && $e->getCode() < 600 ? $e->getCode() : 500;
+                // Determine HTTP status code
+                $code =
+                    $e->getCode() >= 400 && $e->getCode() < 600
+                        ? $e->getCode()
+                        : 500;
                 
-                if ($this->logger) {
-                    $this->logger->error($e->getMessage(), [
-                        'file' => $e->getFile(),
-                        'line' => $e->getLine(),
-                        'trace' => $e->getTraceAsString()
-                    ]);
-                }
-
-                if ($isDebug) {
-                    $html = "<h1>Error: " . $e->getMessage() . "</h1>";
-                    $html .= "<pre>" . $e->getTraceAsString() . "</pre>";
-                    (new Response($html, $code))->send();
-                } else {
-                    (new Response("Internal Server Error", $code))->send();
-                }
+                // Log error
+                $this->log?->log("ERROR", $e->getMessage(), [
+                    "file" => $e->getFile(),
+                    "line" => $e->getLine(),
+                ]);
+                
+                // Send error response (verbose in debug mode)
+                ($debug
+                    ? Response::html(
+                        "<h1>{$e->getMessage()}</h1><pre>{$e->getTraceAsString()}</pre>",
+                        $code
+                    )
+                    : new Response("Internal Server Error", $code)
+                )->send();
+                
             } finally {
-                // Cleanup
-                foreach (array_reverse($this->booted) as $m) $m->terminate();
+                // Terminate modules in reverse order
+                array_walk(
+                    array_reverse($this->booted),
+                    fn($m) => $m->terminate()
+                );
             }
+        }
+
+        /**
+         * Validate incoming request (security gate)
+         * Checks content length, method requirements, and format
+         */
+        private function gate(): void
+        {
+            $len = (int) ($_SERVER["CONTENT_LENGTH"] ?? 0);
+            $type = $_SERVER["CONTENT_TYPE"] ?? "";
+            $method = $_SERVER["REQUEST_METHOD"] ?? "GET";
+            
+            // Calculate max allowed payload
+            $limit = min(
+                2097152,  // 2MB hard limit
+                (int) (preg_replace_callback(
+                    "/^(\d+)([kmg])?/i",
+                    fn($m) => $m[1] * 1024 ** stripos("bkmg", $m[2] ?? "b"),
+                    ini_get("post_max_size")
+                ) ?: PHP_INT_MAX)
+            );
+
+            // Validate payload size
+            $len > $limit && throw new \Exception("Payload Too Large", 413);
+            
+            // Require Content-Length for POST/PUT/PATCH
+            in_array($method, ["POST", "PUT", "PATCH"]) &&
+                $len === 0 &&
+                !str_contains(
+                    $_SERVER["HTTP_TRANSFER_ENCODING"] ?? "",
+                    "chunked"
+                ) &&
+                throw new \Exception("Length Required", 411);
+            
+            // Validate multipart boundary
+            str_starts_with($type, "multipart/form-data") &&
+                !str_contains($type, "boundary=") &&
+                throw new \Exception("Malformed Multipart", 400);
         }
     }
 }
 
-// ---------------------------------------------------------
-// Bootstrap
-// ---------------------------------------------------------
+// ============================================================================
+// BOOTSTRAP - Application initialization
+// ============================================================================
 namespace {
-    use Framework\Core\{Kernel, Config};
-    use Framework\Cache\PhpNativeDriver;
+    use Framework\Core\{Config, Kernel};
+    use Framework\Cache\PhpDriver;
     use Framework\Log\FileLogger;
 
-    $config = new Config([
+    // Configuration
+    $cfg = new Config([
         "db_dsn" => "sqlite:" . dirname(__DIR__) . "/data/db.sqlite",
         "cache_path" => dirname(__DIR__) . "/data/cache",
         "log_path" => dirname(__DIR__) . "/data/logs/app.log",
         "modules_path" => dirname(__DIR__) . "/extensions/modules",
         "plugins_path" => dirname(__DIR__) . "/extensions/plugins",
-        "debug" => true, 
+        "debug" => true,
     ]);
 
-    $kernel = new Kernel($config);
-    $kernel->setCache(new PhpNativeDriver($config->get("cache_path")));
-    $kernel->setLogger(new FileLogger($config->get("log_path")));
-    $kernel->discover($config->get("modules_path"), $config->get("plugins_path"));
-    $kernel->run();
+    // Initialize kernel
+    $k = new Kernel($cfg);
+    $k->setCache(new PhpDriver($cfg->get("cache_path")));
+    $k->setLogger(new FileLogger($cfg->get("log_path")));
+    $k->discover($cfg->get("modules_path"), $cfg->get("plugins_path"));
+    
+    // Handle request
+    $k->run();
 }
